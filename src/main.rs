@@ -1,20 +1,29 @@
-use std::{cmp::max, io::prelude::*};
-#[cfg(testing)]
-use std::time::{Duration, Instant};
-use std::{cmp::min, fmt, usize};
+use std::fmt;
+use std::io::prelude::*;
+use std::process;
+use std::time::{Duration, SystemTime};
+use std::{cmp, fmt::Display};
+use std::{convert, usize};
 
-const MAX_LENGTH:usize=40;
+use cmp::*;
+use process::exit;
 
-#[derive(Clone, Copy)]
-struct CharArray {
-    bytes: [u8; 40], // we only have 40 chars;
+#[allow(dead_code)]
+#[allow(non_camel_case_types)]
+#[allow(non_snake_case)]
+
+const MAXLENGTH: usize = 40;
+
+#[derive(Copy, Clone)]
+struct charVec {
+    array: [u8; 40],
     len: usize,
 }
 
-impl CharArray {
+impl charVec {
     pub fn new() -> Self {
         Self {
-            bytes: [0; 40],
+            array: [0; 40],
             len: 0,
         }
     }
@@ -24,16 +33,16 @@ impl CharArray {
     }
 
     pub fn push(&mut self, byte: u8) {
-        self.bytes[self.len] = byte;
+        self.array[self.len] = byte;
         self.len += 1;
     }
     pub fn clear(&mut self) {
         self.len = 0;
     }
-    pub fn similar(&self, other: &CharArray) -> usize {
+    pub fn similar(&self, other: &charVec) -> usize {
         let minlen = min(self.len(), other.len());
         for i in 0..minlen {
-            if self.bytes[i] != other.bytes[i] {
+            if self.array[i] != other.array[i] {
                 return i;
             }
         }
@@ -41,10 +50,10 @@ impl CharArray {
     }
 }
 
-impl fmt::Display for CharArray {
+impl fmt::Display for charVec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for i in 0..self.len() {
-            let b = self.bytes[i];
+            let b = self.array[i];
             match b {
                 0x7b => write!(f, "å"),
                 0x7c => write!(f, "ä"),
@@ -57,9 +66,9 @@ impl fmt::Display for CharArray {
     }
 }
 
-impl fmt::Debug for CharArray {
+impl fmt::Debug for charVec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for b in self.bytes.iter() {
+        for b in self.array.iter() {
             write!(f, "{} ", b);
         }
 
@@ -68,209 +77,261 @@ impl fmt::Debug for CharArray {
 }
 
 fn main() {
-    //let now = Instant::now();
+    #[cfg(feature = "bench")]
+    let nowTotal = SystemTime::now();
 
-    let mut correct_words: Vec<CharArray> = Vec::with_capacity(500000);
-    //let mut misspelled_words: Vec<CharArray> = Vec::with_capacity(1000);
+    // Take input
 
-    // let mut bytes = Vec::with_capacity(5000000);
-    // std::io::stdin().read_to_end(&mut bytes);
-    // let mut byte_iter = bytes.iter();
+    let mut wordList: Vec<charVec> = Vec::with_capacity(500_000);
 
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input);
-    let mut byte_iter=input.bytes();
 
-    let mut word_buffer = CharArray::new();
+    // | --
 
-    while let Some(byte) = byte_iter.next() {
-        match byte {
-            b'#' => {
-                byte_iter.next();
-                break;
-            },
-            b'\n' | b'\r' => {
-                correct_words.push(word_buffer);
-                word_buffer.clear();
+    // Convert and allocate as bytes
+
+    let mut bytes = input.bytes();
+
+    let mut wordBuffer = charVec::new();
+
+    loop {
+        if let Some(byte) = bytes.next() {
+            match byte {
+                b'#' => {
+                    bytes.next();
+                    wordBuffer.clear();
+                    break;
+                }
+                b'\n' | b'\r' => {
+                    wordList.push(wordBuffer);
+                    wordBuffer.clear();
+                }
+                0xc3 => wordBuffer.push(match bytes.next().unwrap() {
+                    0xa5 => 0x7b, // å => {
+                    0xa4 => 0x7c, // ä => |
+                    0xb6 => 0x7d, // ö => }
+                    _ => panic!("non-allowed character!"),
+                }),
+                b => wordBuffer.push(b),
             }
-            0xc3 => word_buffer.push(match byte_iter.next().unwrap() {
-                0xa5 => 0x7b, // å => {
-                0xa4 => 0x7c, // ä => |
-                0xb6 => 0x7d, // ö => }
-                _ => panic!("non-allowed character!"),
-            }),
-            b => word_buffer.push(b),
+        } else {
+            break;
         }
     }
 
-    let mut prev_word: CharArray = CharArray::new();
-    let mut closest_words: Vec<CharArray> = Vec::with_capacity(128);
+    // | --
 
-    let mut matrix = [[99; MAX_LENGTH + 1]; MAX_LENGTH + 1];
+    // Initialize matrix
 
-    //initialize basecases, i.e the margins
-    for i in 0..MAX_LENGTH + 1 {
-        matrix[i][0] = i;
-        matrix[0][i] = i;
+    let mut dMatrix = [[99 as usize; MAXLENGTH + 1]; MAXLENGTH + 1];
+
+    for i in 0..MAXLENGTH + 1 {
+        dMatrix[i][0] = i;
+        dMatrix[0][i] = i;
     }
-    
 
-    while let Some(byte) = byte_iter.next() {
-        // println!("byte {}",byte);
+    // | --
+    let mut sum = 0usize;
+    let mut counter = 0usize;
+    let mut otherwise = 0usize;
 
+    let mut misspelledWord = charVec::new();
+
+    while let Some(byte) = bytes.next() {
         match byte {
-            b'\n' | b'\r' => { //for every misspelled word
+            b'\n' | b'\r' => {
+                // Do for each misspelled word
+                let m = misspelledWord.len();
+                let mut minimumDistance = MAXLENGTH;
+                let mut oldtarget = charVec::new();
+                let mut closestWords: Vec<charVec> = Vec::with_capacity(100);
 
-                let mut current_min = MAX_LENGTH;
-                let m = word_buffer.len();
-                
-                //go through the dictionary
-
-                for target in correct_words.iter() {
+                for target in wordList.iter() {
                     let n = target.len();
-
-                    let diff = if m >= n { m - n } else { n - m };
-
-                    if diff > current_min { // The difference in length is the minium edit distance.
+                    if (if m > n { m - n } else { n - m } > minimumDistance) {
                         continue;
                     }
 
-                    let offset= prev_word.similar(target);
-                    
-                    //let minlen = min(prev_word.len, n);
-                    // let mut offset=minlen;
-                    // for i in 0..minlen {
-                    //     if prev_word.bytes[i] != target.bytes[i] {
-                    //         offset= i;
-                    //         break;
-                    //     }
-                    // }      
-                    
-                    edit_dist(&mut matrix, m, n, current_min as isize, offset, &word_buffer, &target);
-                    
-                    let distance = matrix[m][n];
+                    let offset = oldtarget.similar(target);
+                    let k = minimumDistance as isize;
 
-                    
-                    if distance < current_min {
-                        current_min = distance;
-                        closest_words.clear();
-                        closest_words.push(*target);
-                    }
-                    else if distance == current_min {
-                        closest_words.push(*target);
+                    if k < m as isize && k < n as isize {
+                        
+                        let start_first = cmp::max(1 as isize, (offset as isize - k + 1)) as usize;
+                        let end_first = max(n as isize, n as isize - k) as usize;
+
+                        
+                        for i in start_first..=end_first {
+                            #[cfg(feature = "debug_specific")]
+                            {
+                                print!(
+                                    "for i: {}, ceil: {}, floor {}",
+                                    i, loweredCeil, raisedFloor
+                                );
+                            }
+
+                            for j in offset + 1 as usize..(i - start_first + 1) {
+                                #[cfg(feature = "debug_specific")]
+                                {
+                                    print!("j: {} ", j);
+                                }
+
+                                let replace_cost =
+                                    if misspelledWord.array[(i - 1)] != target.array[(j - 1)] {
+                                        1
+                                    } else {
+                                        0
+                                    };
+                                let length_changing =
+                                    cmp::min(dMatrix[i - 1][j] + 1, dMatrix[i][j - 1] + 1);
+
+                                dMatrix[i][j] =
+                                    cmp::min(dMatrix[i - 1][j - 1] + replace_cost, length_changing);
+                            }
+                        }
+
+                        let end_second = (offset as isize + k) as usize;
+
+                        for i in end_first..end_second {
+                            #[cfg(feature = "debug_specific")]
+                            {
+                                print!(
+                                    "for i: {}, ceil: {}, floor {}",
+                                    i, loweredCeil, raisedFloor
+                                );
+                            }
+
+                            for j in offset..=n {
+                                #[cfg(feature = "debug_specific")]
+                                {
+                                    print!("j: {} ", j);
+                                }
+
+                                let replace_cost =
+                                    if misspelledWord.array[(i - 1)] != target.array[(j - 1)] {
+                                        1
+                                    } else {
+                                        0
+                                    };
+                                let length_changing =
+                                    cmp::min(dMatrix[i - 1][j] + 1, dMatrix[i][j - 1] + 1);
+
+                                dMatrix[i][j] =
+                                    cmp::min(dMatrix[i - 1][j - 1] + replace_cost, length_changing);
+                            }
+                        }
+
+                        for i in end_second..m + 1 {
+                            #[cfg(feature = "debug_specific")]
+                            {
+                                print!(
+                                    "for i: {}, ceil: {}, floor {}",
+                                    i, loweredCeil, raisedFloor
+                                );
+                            }
+
+                            for j in offset + (i - end_second)..=n {
+                                #[cfg(feature = "debug_specific")]
+                                {
+                                    print!("j: {} ", j);
+                                }
+
+                                let replace_cost =
+                                    if misspelledWord.array[(i - 1)] != target.array[(j - 1)] {
+                                        1
+                                    } else {
+                                        0
+                                    };
+                                let length_changing =
+                                    cmp::min(dMatrix[i - 1][j] + 1, dMatrix[i][j - 1] + 1);
+
+                                dMatrix[i][j] =
+                                    cmp::min(dMatrix[i - 1][j - 1] + replace_cost, length_changing);
+                            }
+                        }
+                    } else {
+                        for i in 1..m + 1 {
+                            let raisedFloor =
+                                cmp::max((i as isize - k), (offset as isize + 1)) as usize;
+                            let loweredCeil = cmp::min((k + i as isize), (n as isize)) as usize;
+
+                            #[cfg(feature = "debug_specific")]
+                            {
+                                print!(
+                                    "for i: {}, ceil: {}, floor {}",
+                                    i, loweredCeil, raisedFloor
+                                );
+                            }
+
+                            for j in raisedFloor..=loweredCeil {
+                                #[cfg(feature = "debug_specific")]
+                                {
+                                    print!("j: {} ", j);
+                                }
+
+                                let replace_cost =
+                                    if misspelledWord.array[(i - 1)] != target.array[(j - 1)] {
+                                        1
+                                    } else {
+                                        0
+                                    };
+                                let length_changing =
+                                    cmp::min(dMatrix[i - 1][j] + 1, dMatrix[i][j - 1] + 1);
+
+                                dMatrix[i][j] =
+                                    cmp::min(dMatrix[i - 1][j - 1] + replace_cost, length_changing);
+                            }
+                        }
                     }
 
-                    prev_word = *target;
+                    let distance = dMatrix[m][n];
+
+                    if distance < minimumDistance {
+                        minimumDistance = distance;
+                        closestWords.clear();
+                        closestWords.push(*target);
+                    } else if distance == minimumDistance {
+                        closestWords.push(*target);
+                    }
+                    oldtarget = *target;
                 }
 
-                print!("{} ({}) ", word_buffer, current_min);
-                for word in &closest_words {
+                print!("{} ({}) ", misspelledWord, minimumDistance);
+                for word in closestWords {
                     print!("{} ", word);
                 }
                 println!();
-
-                closest_words.clear();
-                prev_word.clear();
-
-                word_buffer.clear();
-            },
-
-            0xc3 => word_buffer.push(match byte_iter.next().unwrap() {
-                0xa5 => 0x7b, // å => {
-                0xa4 => 0x7c, // ä => |
-                0xb6 => 0x7d, // ö => }
+                misspelledWord.clear();
+            }
+            0xc3 => misspelledWord.push(match bytes.next() {
+                Some(0xa5) => 0x7b, // å => {
+                Some(0xa4) => 0x7c, // ä => |
+                Some(0xb6) => 0x7d, // ö => }
                 _ => panic!("non-allowed character!"),
             }),
-
-            b => word_buffer.push(b),
-        }
-    }
-}
-
-fn edit_dist(matrix:&mut [[usize;MAX_LENGTH+1];MAX_LENGTH+1],m:usize,n:usize,k:isize,offset:usize,source: &CharArray,target:&CharArray){
-    for i in 1..m + 1 {
-
-        let raisedFloor = max( (i as isize - k), (offset as isize + 1) ) as usize;
-        let loweredCeil = min( (k+i as isize) , (n as isize) ) as usize;
-
-        for j in raisedFloor..=loweredCeil{
-
-            let replace_cost =
-                if source.bytes[(i - 1)] == target.bytes[(j - 1)] {
-                    0
-                } else {
-                    1
-                };
-
-            let ins_del_minimum = min(matrix[(i - 1)][j] + 1, matrix[i][j - 1] + 1);
-            matrix[i][j] =
-                min(ins_del_minimum, matrix[i - 1][j - 1] + replace_cost);
+            b => misspelledWord.push(b),
         }
     }
 
+    // "Global" Assignments
+
+    // | --
+
+    #[cfg(feature = "bench")]
+    println!("{:?}", nowTotal.elapsed().unwrap());
+    #[cfg(feature = "debug")]
+    println!("counter: {} sum: {}", counter, (sum / counter));
+    #[cfg(feature = "debug")]
+    println!("otherwise: {}", otherwise);
 }
 
-fn print_matrix(matrix: &Vec<Vec<usize>>) {
-    for row in matrix {
-        for el in row {
+fn printMatrix(matrix: &[[usize; MAXLENGTH + 1]; MAXLENGTH + 1], m: usize, n: usize) {
+    for row in matrix[0..m].iter() {
+        for el in row[0..n].iter() {
             print!("{} ", el);
         }
         println!();
     }
-}
-
-fn print_pretty(matrix: &Vec<Vec<usize>>, source: &str, target: &str) {
-    print!("    ");
-    for char in target.chars() {
-        print!("{} ", char);
-    }
     println!();
-    for i in 0..source.chars().count() + 1 {
-        if i > 0 {
-            print!("{} ", source.chars().nth(i - 1).unwrap());
-        } else {
-            print!("  ");
-        }
-
-        for j in 0..target.chars().count() + 1 {
-            print!("{} ", matrix[i][j]);
-        }
-        println!();
-    }
 }
-
-fn pause() {
-    let mut _temp = String::new();
-    std::io::stdin().read_line(&mut _temp);
-}
-
-
-// let mut matrix = [0u8;(40+1)*(40+1)];
-
-    //initialize basecases, i.e the margins
-    // for i in 0..MAX_LENGTH + 1 {
-    //     matrix[i]=i as u8;
-    //     matrix[i*41]=i as u8;
-        
-    // }
-    //print_1d_matrix(&matrix, MAX_LENGTH+1, MAX_LENGTH+1);
-    //println!("{}",get_element(&matrix, 41, 40));
-
-    // for i in 1..m + 1 {
-                    //     for j in 1 + offset..n + 1 {
-
-                    //         let replace_cost =
-                    //             if word_buffer.bytes[(i - 1)] == target.bytes[(j - 1)] {
-                    //                 0
-                    //             } else {
-                    //                 1
-                    //             };
-                            
-                    //         let ins_del_minimum = min(matrix[(i - 1)*41+j] + 1, matrix[i*41+j- 1] + 1);
-                    //         matrix[i*41+j] =
-                    //             min(ins_del_minimum, matrix[(i - 1)*41 + j -1] + replace_cost);
-                    //     }
-                    // }
-                    // // print_1d_matrix(&matrix, m, n);
-                    // // println!();
-                    // let distance = matrix[m*41+n];
